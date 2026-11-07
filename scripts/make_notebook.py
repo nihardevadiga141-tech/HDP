@@ -1,0 +1,65 @@
+"""Generate notebooks/model_training.ipynb with faithful, runnable cells."""
+from __future__ import annotations
+
+import json
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+OUT = ROOT / "notebooks" / "model_training.ipynb"
+
+
+def md(source: str) -> dict:
+    return {"cell_type": "markdown", "metadata": {}, "source": source}
+
+
+def code(source: str) -> dict:
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": source,
+    }
+
+
+CELLS = [
+    md("# ❤️ Heart Disease Prediction — Model Training\n\nThis notebook mirrors "
+       "`src/train.py` and produces the artifacts the app consumes."),
+    code("import json\nfrom pathlib import Path\n\nimport joblib\nimport matplotlib.pyplot as plt\nimport numpy as np\nimport pandas as pd\nfrom sklearn.ensemble import VotingClassifier\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import train_test_split\nfrom xgboost import XGBClassifier\n\nfrom src.config import (\n    ENSEMBLE_PIPELINE, EXPLAINER_PATH, FEATURE_IMPORTANCES_JSON,\n    INDIVIDUAL_MODELS, METRICS_JSON, RANDOM_STATE, TEST_SIZE,\n)\nfrom src.preprocessing import build_preprocessor, clean_data, load_data, prepare_features_target\nfrom src.evaluation import evaluate_classifier, roc_points, save_roc_curves, save_confusion_matrices, write_metrics"),
+    md("## 1. Load & clean data"),
+    code("df = clean_data(load_data())\nprint('Shape:', df.shape)\nprint('Target distribution:')\nprint(df['target'].value_counts())"),
+    md("## 2. Exploratory data analysis"),
+    code("df.describe().T\n\n# missing values\nprint('Missing values:')\nprint(df.isna().sum().sum())"),
+    md("## 3. Preprocessing & stratified split"),
+    code("X, y = prepare_features_target(df)\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y\n)\nprint(f'Train: {X_train.shape[0]} | Test: {X_test.shape[0]}')"),
+    md("## 4. Train individual models"),
+    code("preprocessor = build_preprocessor()\n\nmodels = {\n    'Logistic Regression': (LogisticRegression(max_iter=2000, class_weight='balanced', random_state=RANDOM_STATE), 'lr'),\n    'Random Forest': (RandomForestClassifier(n_estimators=300, min_samples_split=5, class_weight='balanced', random_state=RANDOM_STATE, n_jobs=-1), 'rf'),\n    'XGBoost': (XGBClassifier(n_estimators=300, learning_rate=0.05, max_depth=4, subsample=0.9, colsample_bytree=0.8, eval_metric='logloss', random_state=RANDOM_STATE), 'xgb'),\n}\n\nfrom sklearn.pipeline import Pipeline\nfitted = {}\nfor name, (est, key) in models.items():\n    pipe = Pipeline(steps=[('prep', preprocessor), (key, est)])\n    pipe.fit(X_train, y_train)\n    fitted[name] = pipe\n    print('Fitted', name)"),
+    md("## 5. Soft-voting ensemble"),
+    code("ensemble = VotingClassifier(\n    estimators=[(k.lower().replace(' ', '_'), v) for k, v in fitted.items()],\n    voting='soft', n_jobs=-1,\n)\nensemble.fit(X_train, y_train)\nprint('Fitted ensemble')"),
+    md("## 6. Evaluate on the held-out test set"),
+    code("metrics, roc_data, cm_data = {}, {}, {}\nall_models = {**fitted, 'Ensemble (Soft Voting)': ensemble}\nfor name, model in all_models.items():\n    metrics[name] = evaluate_classifier(model, X_test, y_test)\n    pts = roc_points(model, X_test, y_test)\n    pts['roc_auc'] = metrics[name]['roc_auc']\n    roc_data[name] = pts\n    cm_data[name] = metrics[name]['confusion_matrix']\n    m = metrics[name]\n    print(f\"{name:26s} acc={m['accuracy']:.3f} f1={m['f1']:.3f} auc={m['roc_auc']:.3f}\")"),
+    md("## 7. Save artifacts"),
+    code("write_metrics(metrics, roc_data)\nsave_roc_curves(roc_data)\nsave_confusion_matrices(cm_data)\n\njoblib.dump(ensemble, ENSEMBLE_PIPELINE)\njoblib.dump(fitted, INDIVIDUAL_MODELS)\nprint('Saved ensemble + individual models and metric artifacts.')"),
+    md("## 8. SHAP explainability"),
+    code("import shap\n\nX_trans = preprocessor.named_steps['prep'].fit_transform(X_train)\nfeature_names = [str(f) for f in preprocessor.named_steps['prep'].get_feature_names_out()]\n\nxgb_explainer = XGBClassifier(n_estimators=300, learning_rate=0.05, max_depth=4, subsample=0.9, colsample_bytree=0.8, eval_metric='logloss', random_state=RANDOM_STATE)\nxgb_explainer.fit(X_trans, y_train)\nexplainer = shap.TreeExplainer(xgb_explainer)\n\njoblib.dump(\n    {'explainer': explainer, 'preprocessor': preprocessor.named_steps['prep'], 'feature_names': feature_names, 'model': xgb_explainer},\n    EXPLAINER_PATH,\n)\nprint('Explainable saved at', EXPLAINER_PATH)"),
+]
+
+NOTEBOOK = {
+    "cells": CELLS,
+    "metadata": {
+        "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+        "language_info": {"name": "python", "version": "3.11"},
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
+}
+
+
+def main() -> None:
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(NOTEBOOK, indent=1), encoding="utf-8")
+    print("Wrote", OUT)
+
+
+if __name__ == "__main__":
+    main()
